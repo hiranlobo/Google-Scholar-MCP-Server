@@ -227,3 +227,18 @@ This project is licensed under the MIT License.
 ## ⚠️ Disclaimer
 
 This tool is for research purposes only. Please respect Google Scholar's terms of service and use this tool responsibly.
+
+## Anti-robot wall / CAPTCHA workaround
+
+Google Scholar often serves a "show you're not a robot" page to non-browser HTTP clients.
+When that happens the search tools raise `ScholarBlockedError` instead of silently returning
+an empty list. To unblock:
+
+1. Open scholar.google.com in your browser (solve the CAPTCHA if shown, sign-in helps);
+2. Export cookies for scholar.google.com in Netscape format (e.g. the "Get cookies.txt LOCALLY"
+   browser extension);
+3. Save the file as `cookies.txt` next to `google_scholar_server.py` (git-ignored), or point the
+   env var `GOOGLE_SCHOLAR_COOKIES_FILE` at it.
+
+The session will then reuse your browser identity. Keep request volume polite (the built-in
+2–5s sleep between pages) — heavy scraping will get the cookies flagged too.

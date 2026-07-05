@@ -1,6 +1,8 @@
+import os
 import re
 import time
 import random
+from http.cookiejar import MozillaCookieJar
 from urllib.parse import urlencode
 
 import requests
@@ -13,6 +15,31 @@ HEADERS = {
 }
 
 RESULTS_PER_PAGE = 10
+
+# Google Scholar frequently walls non-browser clients behind a "show you're
+# not a robot" page. Workaround: export your Scholar cookies from a logged
+# browser session (extension "Get cookies.txt LOCALLY", Netscape format) to
+# a cookies.txt file next to this script, or point the env var
+# GOOGLE_SCHOLAR_COOKIES_FILE at it.
+def _build_session():
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    cookie_file = os.environ.get("GOOGLE_SCHOLAR_COOKIES_FILE") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "cookies.txt"
+    )
+    if os.path.exists(cookie_file):
+        jar = MozillaCookieJar(cookie_file)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = jar
+            print(f"Loaded Google Scholar cookies from {cookie_file}")
+        except Exception as e:
+            print(f"Warning: could not load cookies from {cookie_file}: {e}")
+    return session
+
+
+class ScholarBlockedError(RuntimeError):
+    """Raised when Google Scholar serves its anti-robot page instead of results."""
 
 
 def _parse_results(soup):
@@ -78,18 +105,28 @@ def _fetch_pages(params, num_results):
     sleeping politely between requests to avoid a Scholar block."""
     results = []
     start = 0
+    session = _build_session()
     while len(results) < num_results:
         page_params = dict(params)
         if start:
             page_params["start"] = start
         url = "https://scholar.google.com/scholar?" + urlencode(page_params)
-        response = requests.get(url, headers=HEADERS, timeout=30)
+        response = session.get(url, timeout=30)
         if response.status_code != 200:
             print(f"Failed to fetch data. HTTP Status code: {response.status_code}")
             break
-        page = _parse_results(BeautifulSoup(response.text, "html.parser"))
+        soup = BeautifulSoup(response.text, "html.parser")
+        page = _parse_results(soup)
         if not page:
-            break  # no more results (or CAPTCHA page)
+            body = soup.get_text(" ", strip=True).lower()
+            if "not a robot" in body or "unusual traffic" in body:
+                raise ScholarBlockedError(
+                    "Google Scholar is serving its anti-robot page to this client. "
+                    "Fix: export browser cookies to cookies.txt next to the server "
+                    "(or set GOOGLE_SCHOLAR_COOKIES_FILE), or run searches through "
+                    "a real browser session. See README."
+                )
+            break  # genuinely no more results
         results.extend(page)
         start += RESULTS_PER_PAGE
         if len(results) < num_results:
