@@ -90,5 +90,45 @@ async def get_author_info(author_name: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"An error occurred while retrieving author information: {str(e)}"}
 
+@mcp.tool()
+async def download_pdf(url: str, dest_path: str) -> Dict[str, Any]:
+    """
+    Download a PDF (e.g. a PDF_URL returned by the search tools) to a local file.
+
+    Args:
+        url: Direct link to the PDF
+        dest_path: Absolute path where the PDF should be saved (including .pdf name)
+
+    Returns:
+        Dictionary with status, saved path or error detail
+    """
+    logging.info(f"Downloading PDF from {url} to {dest_path}")
+    import os
+    import requests
+
+    def _download():
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(url, headers=headers, timeout=60, allow_redirects=True)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "")
+        is_pdf = "pdf" in content_type.lower() or resp.content[:5] == b"%PDF-"
+        if not is_pdf:
+            return {
+                "status": "not_pdf",
+                "detail": f"Response is not a PDF (Content-Type: {content_type}). Keep the URL/DOI as reference instead.",
+                "url": url,
+            }
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(resp.content)
+        return {"status": "ok", "path": dest_path, "bytes": len(resp.content)}
+
+    try:
+        return await asyncio.to_thread(_download)
+    except Exception as e:
+        return {"status": "error", "detail": str(e), "url": url}
+
 if __name__ == "__main__":
     mcp.run()

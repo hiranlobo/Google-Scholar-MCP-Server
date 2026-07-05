@@ -1,190 +1,128 @@
+import re
+import time
+import random
+from urllib.parse import urlencode
+
 import requests
 from bs4 import BeautifulSoup
-import time
 from scholarly import scholarly
 
-# 普通关键词搜索函数
-def google_scholar_search(query, num_results=5):
-    """
-    Function to search Google Scholar using a simple keyword query.
-    
-    Parameters:
-    query (str): The search query (e.g., paper title or author).
-    num_results (int): The number of results to retrieve.
-    
-    Returns:
-    list: A list of dictionaries containing search results.
-    """
-    # Prepare the search URL
-    search_url = f"https://scholar.google.com/scholar?q={query.replace(' ', '+')}"
-    
-    # Set up headers to mimic a real browser request
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9,pt-BR;q=0.8",
+}
 
-    # Send the GET request to Google Scholar
-    response = requests.get(search_url, headers=headers)
-    
-    # Check if the request was successful
-    if response.status_code != 200:
-        print(f"Failed to fetch data. HTTP Status code: {response.status_code}")
-        return []
+RESULTS_PER_PAGE = 10
 
-    # Parse the HTML content using BeautifulSoup
-    soup = BeautifulSoup(response.text, 'html.parser')
 
-    # Find all the articles in the search results
+def _parse_results(soup):
+    """Parse one Google Scholar results page, pairing each entry with its
+    sidebar PDF link (div.gs_ggs) when available."""
     results = []
-    count = 0
+    for item in soup.find_all("div", class_="gs_r"):
+        ri = item.find("div", class_="gs_ri")
+        if ri is None:
+            continue
 
-    # Find the results on the page
-    for item in soup.find_all('div', class_='gs_ri'):
-        if count >= num_results:
-            break
+        title_tag = ri.find("h3", class_="gs_rt")
+        title = title_tag.get_text() if title_tag else "No title available"
+        link = (
+            title_tag.find("a")["href"]
+            if title_tag and title_tag.find("a")
+            else "No link available"
+        )
 
-        title_tag = item.find('h3', class_='gs_rt')
-        title = title_tag.get_text() if title_tag else 'No title available'
+        authors_tag = ri.find("div", class_="gs_a")
+        authors = authors_tag.get_text() if authors_tag else "No authors available"
 
-        link = title_tag.find('a')['href'] if title_tag and title_tag.find('a') else 'No link available'
+        year = None
+        if authors_tag:
+            m = re.search(r"\b(19|20)\d{2}\b", authors_tag.get_text())
+            if m:
+                year = int(m.group(0))
 
-        authors_tag = item.find('div', class_='gs_a')
-        authors = authors_tag.get_text() if authors_tag else 'No authors available'
+        abstract_tag = ri.find("div", class_="gs_rs")
+        abstract = abstract_tag.get_text() if abstract_tag else "No abstract available"
 
-        abstract_tag = item.find('div', class_='gs_rs')
-        abstract = abstract_tag.get_text() if abstract_tag else 'No abstract available'
+        # Direct PDF/full-text link shown by Scholar on the sidebar, if any
+        pdf_url = None
+        ggs = item.find("div", class_="gs_ggs")
+        if ggs and ggs.find("a"):
+            pdf_url = ggs.find("a")["href"]
 
-        result_data = {
-            'Title': title,
-            'Authors': authors,
-            'Abstract': abstract,
-            'URL': link
-        }
-        results.append(result_data)
-        count += 1
+        cited_by = None
+        for a in ri.find_all("a"):
+            text = a.get_text()
+            if text.startswith("Cited by") or text.startswith("Citado por"):
+                m = re.search(r"\d+", text)
+                if m:
+                    cited_by = int(m.group(0))
+                break
 
+        results.append(
+            {
+                "Title": title,
+                "Authors": authors,
+                "Year": year,
+                "Abstract": abstract,
+                "URL": link,
+                "PDF_URL": pdf_url,
+                "CitedBy": cited_by,
+            }
+        )
     return results
 
-# 高级搜索函数
+
+def _fetch_pages(params, num_results):
+    """Fetch as many result pages as needed (10 results per page),
+    sleeping politely between requests to avoid a Scholar block."""
+    results = []
+    start = 0
+    while len(results) < num_results:
+        page_params = dict(params)
+        if start:
+            page_params["start"] = start
+        url = "https://scholar.google.com/scholar?" + urlencode(page_params)
+        response = requests.get(url, headers=HEADERS, timeout=30)
+        if response.status_code != 200:
+            print(f"Failed to fetch data. HTTP Status code: {response.status_code}")
+            break
+        page = _parse_results(BeautifulSoup(response.text, "html.parser"))
+        if not page:
+            break  # no more results (or CAPTCHA page)
+        results.extend(page)
+        start += RESULTS_PER_PAGE
+        if len(results) < num_results:
+            time.sleep(random.uniform(2.0, 5.0))
+    return results[:num_results]
+
+
+def google_scholar_search(query, num_results=5):
+    """Search Google Scholar using a simple keyword query.
+
+    Returns a list of dicts with Title, Authors, Year, Abstract, URL,
+    PDF_URL (direct full-text link when Scholar shows one) and CitedBy.
+    """
+    return _fetch_pages({"q": query, "hl": "en"}, num_results)
+
+
 def advanced_google_scholar_search(query, author=None, year_range=None, num_results=5):
+    """Search Google Scholar with advanced filters (author, year range).
+
+    year_range: tuple/list (start_year, end_year).
     """
-    Function to search Google Scholar using advanced search filters (e.g., author, year range).
-    
-    Parameters:
-    query (str): The search query (e.g., paper title or topic).
-    author (str): The author's name to filter the results (default is None).
-    year_range (tuple): A tuple (start_year, end_year) to filter the results by publication year (default is None).
-    num_results (int): The number of results to retrieve.
-    
-    Returns:
-    list: A list of dictionaries containing search results.
-    """
-    # Prepare the advanced search URL
-    search_url = "https://scholar.google.com/scholar?"
-    
-    # Build the search query
-    search_params = {'q': query.replace(' ', '+')}
+    params = {"q": query, "hl": "en"}
     if author:
-        search_params['as_auth'] = author
+        params["as_sauthors"] = author
     if year_range:
         start_year, end_year = year_range
-        search_params['as_ylo'] = start_year  # Start year
-        search_params['as_yhi'] = end_year  # End year
-    
-    # Encode the search parameters into the URL
-    search_url += '&'.join([f"{key}={value}" for key, value in search_params.items()])
+        params["as_ylo"] = start_year
+        params["as_yhi"] = end_year
+    return _fetch_pages(params, num_results)
 
-    # Set up headers to mimic a real browser request
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
 
-    # Send the GET request to Google Scholar
-    response = requests.get(search_url, headers=headers)
-    
-    # Check if the request was successful
-    if response.status_code != 200:
-        print(f"Failed to fetch data. HTTP Status code: {response.status_code}")
-        return []
-
-    # Parse the HTML content using BeautifulSoup
-    soup = BeautifulSoup(response.text, 'html.parser')
-
-    # Find all the articles in the search results
-    results = []
-    count = 0
-
-    # Find the results on the page
-    for item in soup.find_all('div', class_='gs_ri'):
-        if count >= num_results:
-            break
-
-        title_tag = item.find('h3', class_='gs_rt')
-        title = title_tag.get_text() if title_tag else 'No title available'
-
-        link = title_tag.find('a')['href'] if title_tag and title_tag.find('a') else 'No link available'
-
-        authors_tag = item.find('div', class_='gs_a')
-        authors = authors_tag.get_text() if authors_tag else 'No authors available'
-
-        abstract_tag = item.find('div', class_='gs_rs')
-        abstract = abstract_tag.get_text() if abstract_tag else 'No abstract available'
-
-        result_data = {
-            'Title': title,
-            'Authors': authors,
-            'Abstract': abstract,
-            'URL': link
-        }
-        results.append(result_data)
-        count += 1
-
-    return results
-
-# Example usage:
 if __name__ == "__main__":
-    # 1.普通关键词搜索
-    query = "machine learning"
-    results = google_scholar_search(query, num_results=5)
-    print("Results for keyword search:")
-    for result in results:
-        print(f"\nTitle: {result['Title']}")
-        print(f"Authors: {result['Authors']}")
-        print(f"Abstract: {result['Abstract']}")
-        print(f"URL: {result['URL']}")
+    results = google_scholar_search("multidimensional poverty municipalities Brazil", num_results=5)
+    for r in results:
+        print(f"\nTitle: {r['Title']}\nYear: {r['Year']}\nPDF: {r['PDF_URL']}\nURL: {r['URL']}")
         print("-" * 80)
-
-    # 2.高级搜索
-    advanced_query = "machine learning"
-    advanced_results = advanced_google_scholar_search(advanced_query, author="Ian Goodfellow", year_range=(2010, 2021), num_results=5)
-    print("\nResults for advanced search:")
-    for result in advanced_results:
-        print(f"\nTitle: {result['Title']}")
-        print(f"Authors: {result['Authors']}")
-        print(f"Abstract: {result['Abstract']}")
-        print(f"URL: {result['URL']}")
-        print("-" * 80)
-
-
-    # Retrieve the author's data, fill-in, and print
-    # 3.Get an iterator for the author results
-    search_query = scholarly.search_author('Steven A Cholewiak')
-    # 4.Retrieve the first result from the iterator
-    first_author_result = next(search_query)
-    scholarly.pprint(first_author_result)
-
-    # 5.Retrieve all the details for the author
-    author = scholarly.fill(first_author_result )
-    scholarly.pprint(author)
-
-    # 6.Take a closer look at the first publication
-    first_publication = author['publications'][0]
-    first_publication_filled = scholarly.fill(first_publication)
-    scholarly.pprint(first_publication_filled)
-
-    # 7.Print the titles of the author's publications
-    publication_titles = [pub['bib']['title'] for pub in author['publications']]
-    print(publication_titles)
-
-
-
